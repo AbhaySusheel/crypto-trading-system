@@ -1,0 +1,14 @@
+websockets
+redis
+pandas
+numpy
+ta
+xgboost
+python-binance
+joblib
+scikit-learn
+asyncpg
+sqlalchemy
+psycopg2-binary
+firebase-admin
+python-dotenv
