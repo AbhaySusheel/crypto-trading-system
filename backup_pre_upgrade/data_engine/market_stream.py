@@ -21,9 +21,7 @@ class BinanceStream:
                 async with websockets.connect(
                     url,
                     ping_interval=20,
-                    ping_timeout=10,
-                    close_timeout=10,
-                    max_size=2**23
+                    ping_timeout=10
                 ) as ws:
 
                     print("✅ Connected to Binance WebSocket")

@@ -113,17 +113,18 @@ class TradeManager:
             _, price_precision = self.binance.get_symbol_precision(symbol)
             sl = round(trade["stop_loss"], price_precision)
             tp = round(trade["take_profit"], price_precision)
+
+            # Opposite side to close
             exit_side = "SELL" if side == "LONG" else "BUY"
 
-            # STOP LOSS (using STOP_MARKET for guaranteed execution)
+            # STOP LOSS
             self.binance.client.futures_create_order(
                 symbol=symbol,
                 side=exit_side,
                 type="STOP_MARKET",
                 stopPrice=sl,
                 closePosition=True,
-                workingType="MARK_PRICE",  # Use mark price (more stable)
-                priceProtect=True            # ← NEW: Prevents bad fills
+                workingType="MARK_PRICE"
             )
             time.sleep(0.2)
 
@@ -134,14 +135,14 @@ class TradeManager:
                 type="TAKE_PROFIT_MARKET",
                 stopPrice=tp,
                 closePosition=True,
-                workingType="MARK_PRICE",
-                priceProtect=True            # ← NEW
+                workingType="MARK_PRICE"
             )
 
             print(f"🎯 SL/TP SET {symbol} {side} | SL: {sl} | TP: {tp}")
 
         except Exception as e:
             print(f"❌ SL/TP FAILED for {symbol}: {e}")
+
     def check_trailing_stop(self, symbol, current_price, portfolio):
         """
         Move SL to breakeven once price moves +0.4% in favor.
@@ -205,13 +206,6 @@ class TradeManager:
             print(f"❌ Update SL error {symbol}: {e}")
 
     def ensure_sl_tp(self, portfolio):
-        """
-        Bulletproof SL/TP recovery.
-        Handles:
-        - Existing orders detection (all variants)
-        - Price validation (avoid -2021 errors)
-        - Side detection (LONG vs SHORT)
-        """
         positions = portfolio.get("positions", {})
 
         for symbol, pos in positions.items():
@@ -226,56 +220,16 @@ class TradeManager:
                     continue
                 self.last_protection_check[symbol] = now
 
-                # Get current market price
-                try:
-                    ticker = self.binance.client.futures_symbol_ticker(symbol=symbol)
-                    current_price = float(ticker["price"])
-                except Exception as e:
-                    print(f"⚠️ Cannot get price for {symbol}: {e}")
-                    continue
-
-                # Check existing orders (improved detection)
                 open_orders = self.binance.client.futures_get_open_orders(symbol=symbol)
-                
-                has_sl = False
-                has_tp = False
-                expected_exit_side = (
-                    "SELL"
-                    if qty > 0
-                    else "BUY"
-                )
-                
-                for order in open_orders:
-                    order_type = order.get("type", "")
-                    order_side = order.get("side", "")
-                    close_position = order.get("closePosition", False)
-                    reduce_only = order.get("reduceOnly", False)
-
-
-                    # Wrong side -> ignore
-                    if order_side != expected_exit_side:
-                        continue
-
-                        # Not protection order -> ignore
-                    if not (close_position or reduce_only):
-                        continue
-                    
-                    # SL: STOP_MARKET or STOP
-                    if order_type in ("STOP_MARKET", "STOP"):
-                        if close_position or reduce_only:
-                            has_sl = True
-                    
-                    # TP: TAKE_PROFIT_MARKET or TAKE_PROFIT
-                    if order_type in ("TAKE_PROFIT_MARKET", "TAKE_PROFIT"):
-                        if close_position or reduce_only:
-                            has_tp = True
+                has_sl = any(o["type"] == "STOP_MARKET" for o in open_orders)
+                has_tp = any(o["type"] == "TAKE_PROFIT_MARKET" for o in open_orders)
 
                 if has_sl and has_tp:
-                    continue  # Already protected
+                    continue
 
-                print(f"⚠️ Missing protection for {symbol} (SL={has_sl}, TP={has_tp})")
+                print(f"⚠️ Missing SL/TP for {symbol}")
 
-                entry = float(pos["entry_price"])
+                entry = pos["entry_price"]
                 side = "LONG" if qty > 0 else "SHORT"
 
                 # Use stored metadata if available
@@ -283,7 +237,7 @@ class TradeManager:
                     sl = self.trade_metadata[symbol]["sl"]
                     tp = self.trade_metadata[symbol]["tp"]
                 else:
-                    # Fallback defaults based on entry
+                    # Fallback defaults
                     if side == "LONG":
                         sl = entry * 0.9975
                         tp = entry * 1.006
@@ -297,79 +251,24 @@ class TradeManager:
 
                 exit_side = "SELL" if side == "LONG" else "BUY"
 
-                # ===== CRITICAL: Price validation to avoid -2021 errors =====
-                if side == "LONG":
-                    # For LONG: SL must be BELOW current price, TP must be ABOVE
-                    if sl >= current_price:
-                        # Position is in heavy loss, place SL just below current price
-                        sl = round(current_price * 0.995, price_precision)
-                        print(f"⚠️ {symbol} SL adjusted (position in loss): {sl}")
-                    if tp <= current_price:
-                        # Position already past TP target, place TP just above current
-                        tp = round(current_price * 1.005, price_precision)
-                        print(f"⚠️ {symbol} TP adjusted: {tp}")
-                else:  # SHORT
-                    # For SHORT: SL must be ABOVE current price, TP must be BELOW
-                    if sl <= current_price:
-                        sl = round(current_price * 1.005, price_precision)
-                        print(f"⚠️ {symbol} SL adjusted: {sl}")
-                    if tp >= current_price:
-                        tp = round(current_price * 0.995, price_precision)
-                        print(f"⚠️ {symbol} TP adjusted: {tp}")
-
-                # Place SL
                 if not has_sl:
-                    try:
-                        self.binance.client.futures_create_order(
-                            symbol=symbol,
-                            side=exit_side,
-                            type="STOP_MARKET",
-                            stopPrice=sl,
-                            closePosition=True,
-                            workingType="MARK_PRICE"
-                        )
-                        print(f"✅ SL placed for {symbol} @ {sl}")
-                        time.sleep(0.3)
-                    except Exception as e:
-                        print(f"❌ SL placement failed {symbol}: {e}")
+                    self.binance.client.futures_create_order(
+                        symbol=symbol, side=exit_side, type="STOP_MARKET",
+                        stopPrice=sl, closePosition=True, workingType="MARK_PRICE"
+                    )
+                    time.sleep(0.2)
 
-                # Place TP
                 if not has_tp:
-                    try:
-                        self.binance.client.futures_create_order(
-                            symbol=symbol,
-                            side=exit_side,
-                            type="TAKE_PROFIT_MARKET",
-                            stopPrice=tp,
-                            closePosition=True,
-                            workingType="MARK_PRICE"
-                        )
-                        print(f"✅ TP placed for {symbol} @ {tp}")
-                        time.sleep(0.3)
-                    except Exception as e:
-                        print(f"❌ TP placement failed {symbol}: {e}")
+                    self.binance.client.futures_create_order(
+                        symbol=symbol, side=exit_side, type="TAKE_PROFIT_MARKET",
+                        stopPrice=tp, closePosition=True, workingType="MARK_PRICE"
+                    )
+                    time.sleep(0.2)
+
+                print(f"✅ Protection restored for {symbol}")
 
             except Exception as e:
                 print(f"❌ Protection error {symbol}: {e}")
-
-
-    def get_last_fill_price(self, symbol):
-        """
-        Get the actual fill price from the last closed trade.
-        Used for accurate PnL calculation.
-        """
-        try:
-            trades = self.binance.client.futures_account_trades(
-                symbol=symbol,
-                limit=5
-            )
-            if trades:
-                # Get most recent trade
-                last_trade = trades[-1]
-                return float(last_trade["price"])
-        except Exception as e:
-            print(f"⚠️ Could not get fill price for {symbol}: {e}")
-        return None            
 
     def can_trade_symbol(self, symbol):
         now = time.time()
@@ -378,75 +277,6 @@ class TradeManager:
             return False
         self.last_trade_time[symbol] = now
         return True
-
-
-    def get_last_fill_data(self, symbol):
-        """
-        Get REAL close information from Binance.
-
-        Returns:
-        {
-            "exit_price": float,
-            "realized_pnl": float,
-            "commission": float,
-            "net_pnl": float
-        }
-        """
-
-        try:
-            trades = self.binance.client.futures_account_trades(
-                symbol=symbol,
-                limit=20
-            )
-
-            close_trades = []
-
-            for t in reversed(trades):
-
-                realized = float(t.get("realizedPnl", 0))
-
-                # Only actual closing trades
-                if realized != 0:
-                    close_trades.append(t)
-
-            if not close_trades:
-                return None
-
-            total_qty = 0
-            total_value = 0
-            total_pnl = 0
-            total_commission = 0
-
-            for t in close_trades:
-
-                qty = abs(float(t["qty"]))
-                price = float(t["price"])
-
-                total_qty += qty
-                total_value += qty * price
-
-                total_pnl += float(t["realizedPnl"])
-
-                total_commission += abs(
-                    float(t.get("commission", 0))
-                )
-
-            avg_exit = (
-                total_value / total_qty
-                if total_qty else 0
-            )
-
-            return {
-                "exit_price": avg_exit,
-                "realized_pnl": total_pnl,
-                "commission": total_commission,
-                "net_pnl": total_pnl - total_commission
-            }
-
-        except Exception as e:
-            print(f"❌ get_last_fill_data error {symbol}: {e}")
-
-        return None    
 
     def cleanup_closed_trade(self, symbol):
         """Remove metadata when trade closes"""

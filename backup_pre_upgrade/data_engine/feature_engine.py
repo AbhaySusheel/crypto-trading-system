@@ -39,7 +39,8 @@ symbols = [
 
 def generate_signal(last, regime, symbol):
     """
-    Generate LONG or SHORT signal with STRICT filters.
+    Generate LONG or SHORT signal based on indicators + BTC regime.
+    Returns: ("LONG", score) or ("SHORT", score) or (None, 0)
     """
     long_score = 0
     short_score = 0
@@ -51,29 +52,12 @@ def generate_signal(last, regime, symbol):
     volume_spike = last["volume_spike"]
     close = last["close"]
     vwap = last.get("vwap", close)
-    atr_pct = last.get("atr_pct", 0)
 
-    # ===== HARD FILTERS (reject trade immediately) =====
-    
-    # Skip flat/weak market
+    # Skip flat market
     if trend_strength < 0.0015:
         return None, 0
-    
-    # Skip extreme RSI (overbought/oversold = high reversal risk)
-    if rsi > 68 or rsi < 32:
-        print(f"⚠️ {symbol} RSI extreme: {rsi:.2f} — skipping")
-        return None, 0
-    
-    # Skip if ATR too low (no volatility = no profit potential)
-    if atr_pct < 0.0008:  # 0.08%
-        return None, 0
-    
-    # Skip if ATR too high (too volatile = unpredictable)
-    if atr_pct > 0.015:  # 1.5%
-        print(f"⚠️ {symbol} ATR too high: {atr_pct*100:.3f}% — skipping")
-        return None, 0
 
-    # ===== LONG SCORING =====
+    # ----- LONG conditions -----
     if regime in ("BULLISH", "NEUTRAL"):
         if ema_distance > 0.001:
             long_score += 1
@@ -81,12 +65,12 @@ def generate_signal(last, regime, symbol):
             long_score += 1
         if volume_spike:
             long_score += 1
-        if 45 < rsi < 65:  # Stricter range
+        if 40 < rsi < 70:  # not overbought
             long_score += 1
         if close > vwap:
             long_score += 1
 
-    # ===== SHORT SCORING =====
+    # ----- SHORT conditions -----
     if regime in ("BEARISH", "NEUTRAL"):
         if ema_distance < -0.001:
             short_score += 1
@@ -94,13 +78,13 @@ def generate_signal(last, regime, symbol):
             short_score += 1
         if volume_spike:
             short_score += 1
-        if 35 < rsi < 55:  # Stricter range
+        if 30 < rsi < 60:  # not oversold
             short_score += 1
         if close < vwap:
             short_score += 1
 
-    # ===== STRICT THRESHOLD =====
-    threshold = 4  # Need 4/5 confirmations
+    # Need at least 4/5 confirmation for high quality
+    threshold = 4
 
     if long_score >= threshold and long_score > short_score:
         return "LONG", long_score
@@ -108,6 +92,8 @@ def generate_signal(last, regime, symbol):
         return "SHORT", short_score
 
     return None, 0
+
+
 # ---------------- MAIN CANDLE HANDLER ----------------
 async def on_candle(candle):
     symbol = candle["symbol"]
@@ -131,48 +117,14 @@ async def on_candle(candle):
         trade_manager.check_trailing_stop(symbol, price, portfolio)
 
     # ---------------- DETECT CLOSED TRADES ----------------
-    # ---------------- DETECT CLOSED TRADES ----------------
-
-
-    # LIVE portfolio for accurate close detection
-    live_portfolio = trade_manager.get_portfolio()
-    live_positions = live_portfolio.get("positions", {})
-
     for sym in list(tracker.active_trades.keys()):
-
-        if sym not in live_positions:
-
-            fill_data = trade_manager.get_last_fill_data(sym)
-
-            if fill_data:
-                exit_price = fill_data["exit_price"]
-                net_pnl = fill_data["net_pnl"]
-
-                print(
-                    f"💰 {sym} CLOSED | "
-                    f"Exit={exit_price:.4f} | "
-                    f"NetPnL={net_pnl:.4f}"
-                )
-
-            else:
-                exit_price = price
-                net_pnl = None
-
+        if sym not in current_positions:
+            exit_price = price
             result = tracker.close_trade(sym, exit_price)
 
             if result:
-
-                # Override tracker pnl with REAL Binance pnl
-                if net_pnl is not None:
-                    result["pnl"] = net_pnl
-                    result["result"] = (
-                        "WIN"
-                        if net_pnl > 0
-                        else "LOSS"
-                    )
-
+                # Update risk manager
                 risk.update_pnl(result["pnl"])
-
                 trade_manager.cleanup_closed_trade(sym)
 
                 stats = tracker.stats()
@@ -183,7 +135,6 @@ async def on_candle(candle):
 
 Symbol: {result['symbol']}
 Result: {result['result']}
-Actual Exit: {exit_price:.4f}
 PnL: {round(result['pnl'], 4)} USDT
 
 📊 Today's Stats:
@@ -192,35 +143,6 @@ Trades: {risk_status['trades_today']}
 Win Rate: {stats['win_rate']}%
 Consecutive Losses: {risk_status['consecutive_losses']}
 """))
-#     for sym in list(tracker.active_trades.keys()):
-#         if sym not in current_positions:
-#             # Get ACTUAL fill price, not approximate
-#             actual_exit = trade_manager.get_last_fill_price(sym)
-#             exit_price = actual_exit if actual_exit else price
-            
-#             result = tracker.close_trade(sym, exit_price)
-
-#             if result:
-#                 risk.update_pnl(result["pnl"])
-#                 trade_manager.cleanup_closed_trade(sym)
-
-#                 stats = tracker.stats()
-#                 risk_status = risk.get_status()
-
-#                 asyncio.create_task(send_telegram(f"""
-# 📉 TRADE CLOSED
-
-# Symbol: {result['symbol']}
-# Result: {result['result']}
-# Actual Exit: {exit_price}
-# PnL: {round(result['pnl'], 4)} USDT
-
-# 📊 Today's Stats:
-# Daily PnL: ${risk_status['daily_pnl']}
-# Trades: {risk_status['trades_today']}
-# Win Rate: {stats['win_rate']}%
-# Consecutive Losses: {risk_status['consecutive_losses']}
-# """))
 
     # ---------------- RISK CHECK ----------------
     if not risk.can_trade(trade_manager.open_trades_count(portfolio)):
@@ -300,7 +222,6 @@ RSI: {last['rsi']:.2f}
     order = trade_manager.execute_trade(trade)
 
     if order:
-        await asyncio.sleep(1.5)
         tracker.add_trade(trade)
         trade_manager.set_sl_tp(trade)
 

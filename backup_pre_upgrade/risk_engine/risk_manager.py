@@ -1,76 +1,32 @@
 # risk_engine/risk_manager.py
 import time
-import json
-import os
 from datetime import datetime, date
 
 
 class RiskManager:
 
-    STATE_FILE = "risk_state.json"
-
     def __init__(self):
         # Position limits
         self.max_open_trades = 3              # Reduced from 5 (focus quality)
-        self.max_notional_per_trade = 30      # Max $30 per trade
+        self.max_notional_per_trade = 50      # Max $50 per trade
 
         # Risk per trade
-        self.risk_amount = 3                  # $3 risk per trade (consistent)
+        self.risk_amount = 5                   # $5 risk per trade (consistent)
 
         # Daily limits
-        self.daily_loss_limit_usd = 10        # Stop after -$10 daily loss
-        self.daily_profit_target = 20         # Optional: stop at +$20
+        self.daily_loss_limit_usd = 15        # Stop after -$15 daily loss
+        self.daily_profit_target = 30         # Optional: stop at +$30
         self.current_daily_pnl = 0
         self.current_day = date.today()
 
         # Circuit breaker
         self.consecutive_losses = 0
-        self.max_consecutive_losses = 2
-        self.cooldown_until = 0               # Timestamp until trading resumes
+        self.max_consecutive_losses = 3
+        self.cooldown_until = 0                # Timestamp until trading resumes
 
         # Total trades today
         self.trades_today = 0
-        self.max_trades_per_day = 10
-
-        # Load persistent state (after all attributes initialized)
-        self._load_state()
-
-    def _load_state(self):
-        """Load state from disk if exists (same-day only)"""
-        if not os.path.exists(self.STATE_FILE):
-            return
-        try:
-            with open(self.STATE_FILE, 'r') as f:
-                state = json.load(f)
-            saved_date = state.get("date")
-            today_str = str(date.today())
-
-            # Only restore if same day
-            if saved_date == today_str:
-                self.current_daily_pnl = state.get("daily_pnl", 0)
-                self.trades_today = state.get("trades_today", 0)
-                self.consecutive_losses = state.get("consecutive_losses", 0)
-                self.cooldown_until = state.get("cooldown_until", 0)
-                print(f"📂 Loaded risk state: PnL=${self.current_daily_pnl}, Trades={self.trades_today}, Losses={self.consecutive_losses}")
-            else:
-                print(f"📅 New day detected — starting fresh")
-        except Exception as e:
-            print(f"⚠️ Could not load risk state: {e}")
-
-    def _save_state(self):
-        """Save current state to disk"""
-        try:
-            state = {
-                "date": str(date.today()),
-                "daily_pnl": self.current_daily_pnl,
-                "trades_today": self.trades_today,
-                "consecutive_losses": self.consecutive_losses,
-                "cooldown_until": self.cooldown_until
-            }
-            with open(self.STATE_FILE, 'w') as f:
-                json.dump(state, f)
-        except Exception as e:
-            print(f"⚠️ Could not save risk state: {e}")
+        self.max_trades_per_day = 20
 
     def reset_daily(self):
         """Reset daily counters at start of new day"""
@@ -82,7 +38,6 @@ class RiskManager:
             self.trades_today = 0
             self.consecutive_losses = 0
             self.cooldown_until = 0
-            self._save_state()
 
     def can_trade(self, open_trades_count):
         self.reset_daily()
@@ -108,7 +63,7 @@ class RiskManager:
             print(f"🛑 MAX DAILY TRADES ({self.max_trades_per_day}) REACHED")
             return False
 
-        # Daily profit target
+        # Daily profit target (optional, comment out if you don't want this)
         if self.current_daily_pnl >= self.daily_profit_target:
             print(f"🎯 DAILY PROFIT TARGET HIT: ${self.current_daily_pnl:.2f}")
             return False
@@ -151,8 +106,6 @@ class RiskManager:
         else:
             self.consecutive_losses = 0
             print(f"📈 Win streak resumed")
-
-        self._save_state()  # Save after every update
 
     def get_status(self):
         return {
