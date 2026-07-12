@@ -1,17 +1,158 @@
 # execution_engine/trade_manager.py
+import logging
+import os
 import time
+import uuid
+
+from execution_engine.order_state import (
+    FillEvent,
+    JsonOrderStateStorage,
+    OrderRecord,
+    OrderStateManager,
+    OrderStatus,
+    OrderType,
+)
+
+logger = logging.getLogger(__name__)
 
 
 class TradeManager:
 
-    def __init__(self, binance_client, risk_manager):
+    def __init__(self, binance_client, risk_manager, order_state_path=None, portfolio_cache=None):
         self.binance = binance_client
         self.risk = risk_manager
+        self.portfolio_cache = portfolio_cache
         self.last_trade_time = {}
         self.last_protection_check = {}
         self.trade_metadata = {}  # symbol -> {side, entry, sl, tp, partial_taken}
+        self.order_state_manager = None
+        self._init_order_state(order_state_path)
+
+    def _init_order_state(self, order_state_path):
+        if order_state_path is None:
+            order_state_path = os.path.join(os.path.dirname(__file__), "order_state.json")
+        try:
+            storage = JsonOrderStateStorage(order_state_path)
+            self.order_state_manager = OrderStateManager(storage)
+            logger.info("Order state manager initialized at %s", order_state_path)
+            # TODO: future reconciliation should hydrate live trade state from exchange on startup.
+        except Exception as exc:
+            self.order_state_manager = None
+            logger.warning("Order state manager unavailable: %s", exc)
+
+    def _save_order_state(self):
+        if not self.order_state_manager:
+            return
+        try:
+            self.order_state_manager.save_state()
+        except Exception as exc:
+            logger.warning("Order state save failed: %s", exc)
+
+    def _record_order_shadow(
+        self,
+        order_id,
+        symbol,
+        side,
+        order_type,
+        qty,
+        price=None,
+        stop_price=None,
+        trade_role=None,
+        parent_order_id=None,
+    ):
+        if not self.order_state_manager:
+            return None
+        try:
+            trade = self.order_state_manager.get_trade_by_symbol(symbol)
+            trade_id = trade.trade_id if trade else f"trade-{uuid.uuid4().hex}"
+            client_order_id = self.order_state_manager.allocate_client_order_id()
+            record = OrderRecord(
+                order_id=order_id,
+                client_order_id=client_order_id,
+                trade_id=trade_id,
+                symbol=symbol,
+                side=side,
+                type=order_type,
+                qty=qty,
+                price=price,
+                stop_price=stop_price,
+                parent_order_id=parent_order_id,
+                trade_role=trade_role,
+            )
+            self.order_state_manager.record_new_order(record)
+            self._save_order_state()
+            logger.info(
+                "Shadow order recorded: order_id=%s symbol=%s type=%s trade_id=%s qty=%s stop_price=%s",
+                order_id,
+                symbol,
+                order_type.name,
+                trade_id,
+                qty,
+                stop_price,
+            )
+            # TODO: reconcile shadow order records with exchange order IDs during startup recovery.
+            return record
+        except Exception as exc:
+            logger.warning("Failed to record shadow order %s: %s", order_id, exc)
+            return None
+
+    def _record_fill_shadow(self, order_id, qty, price, commission=0.0, commission_asset="USDT"):
+        if not self.order_state_manager:
+            return
+        try:
+            fill = FillEvent(
+                fill_id=f"fill-{uuid.uuid4().hex}",
+                order_id=order_id,
+                qty=qty,
+                price=price,
+                commission=commission,
+                commission_asset=commission_asset,
+            )
+            self.order_state_manager.record_fill(order_id, fill)
+            self._save_order_state()
+            logger.info(
+                "Shadow fill recorded: order_id=%s qty=%s price=%s commission=%s asset=%s",
+                order_id,
+                qty,
+                price,
+                commission,
+                commission_asset,
+            )
+            # TODO: future reconciliation should validate these fills against exchange order reports.
+        except Exception as exc:
+            logger.warning("Failed to record shadow fill for order %s: %s", order_id, exc)
+
+    def _mirror_cancel_order(self, order_id):
+        if not self.order_state_manager or order_id is None:
+            return
+        try:
+            order = self.order_state_manager.orders_by_id.get(int(order_id))
+            if order and order.status in {OrderStatus.PENDING, OrderStatus.PARTIAL_FILLED}:
+                order.mark_cancelled()
+                self._save_order_state()
+                logger.info("Shadow cancel recorded: order_id=%s status=%s", order_id, order.status.value)
+                # TODO: reconciliation should verify actual exchange cancellation state before trusting local cancel state.
+        except Exception as exc:
+            logger.warning("Failed to mirror cancel for order %s: %s", order_id, exc)
+
+    def _mirror_trade_closure(self, symbol):
+        if not self.order_state_manager:
+            return
+        try:
+            trade = self.order_state_manager.get_trade_by_symbol(symbol)
+            if not trade:
+                return
+            trade.closed_qty = trade.entry_filled_qty
+            self.order_state_manager.mark_trade_closed(trade.trade_id)
+            self._save_order_state()
+            logger.info("Shadow trade closed: symbol=%s trade_id=%s status=%s", symbol, trade.trade_id, trade.status.value)
+            # TODO: future reconciliation should confirm trade closure with exchange fill/cancel history.
+        except Exception as exc:
+            logger.warning("Failed to mirror trade close for %s: %s", symbol, exc)
 
     def get_portfolio(self):
+        if self.portfolio_cache is not None:
+            return self.portfolio_cache.get_portfolio()
         return self.binance.get_portfolio()
 
     def open_trades_count(self, portfolio):
@@ -87,6 +228,32 @@ class TradeManager:
             executed_qty = abs(float(order["executedQty"]))
             trade["executed_qty"] = executed_qty
 
+            if self.order_state_manager:
+                try:
+                    state_trade = self.order_state_manager.create_trade(
+                        symbol=symbol,
+                        side=side,
+                        entry_qty=executed_qty,
+                        entry_order_id=int(order["orderId"]),
+                    )
+                    state_trade.entry_filled_qty = executed_qty
+                    self._record_order_shadow(
+                        order_id=int(order["orderId"]),
+                        symbol=symbol,
+                        side=order_side,
+                        order_type=OrderType.ENTRY,
+                        qty=quantity,
+                        price=trade.get("entry"),
+                        trade_role="entry",
+                    )
+                    self._record_fill_shadow(
+                        order_id=int(order["orderId"]),
+                        qty=executed_qty,
+                        price=trade.get("entry"),
+                    )
+                except Exception as exc:
+                    logger.warning("Failed to mirror entry trade for %s: %s", symbol, exc)
+
             # Store metadata for trailing stop & partial TP
             self.trade_metadata[symbol] = {
                 "side": side,
@@ -116,7 +283,7 @@ class TradeManager:
             exit_side = "SELL" if side == "LONG" else "BUY"
 
             # STOP LOSS (using STOP_MARKET for guaranteed execution)
-            self.binance.client.futures_create_order(
+            sl_order = self.binance.client.futures_create_order(
                 symbol=symbol,
                 side=exit_side,
                 type="STOP_MARKET",
@@ -125,10 +292,31 @@ class TradeManager:
                 workingType="MARK_PRICE",  # Use mark price (more stable)
                 priceProtect=True            # ← NEW: Prevents bad fills
             )
+            if self.order_state_manager:
+                try:
+                    state_trade = self.order_state_manager.get_trade_by_symbol(symbol)
+                    sl_order_id = int(sl_order.get("orderId", 0))
+                    self._record_order_shadow(
+                        order_id=sl_order_id,
+                        symbol=symbol,
+                        side=exit_side,
+                        order_type=OrderType.STOP_LOSS,
+                        qty=abs(trade.get("executed_qty", trade.get("qty", 0.0))),
+                        stop_price=sl,
+                        trade_role="stop_loss",
+                        parent_order_id=(state_trade.entry_order_id if state_trade else None),
+                    )
+                    if state_trade:
+                        state_trade.sl_order_id = sl_order_id
+                        state_trade.sl_price = sl
+                        self._save_order_state()
+                except Exception as exc:
+                    logger.warning("Failed to mirror SL order for %s: %s", symbol, exc)
+
             time.sleep(0.2)
 
             # TAKE PROFIT
-            self.binance.client.futures_create_order(
+            tp_order = self.binance.client.futures_create_order(
                 symbol=symbol,
                 side=exit_side,
                 type="TAKE_PROFIT_MARKET",
@@ -137,6 +325,26 @@ class TradeManager:
                 workingType="MARK_PRICE",
                 priceProtect=True            # ← NEW
             )
+            if self.order_state_manager:
+                try:
+                    state_trade = self.order_state_manager.get_trade_by_symbol(symbol)
+                    tp_order_id = int(tp_order.get("orderId", 0))
+                    self._record_order_shadow(
+                        order_id=tp_order_id,
+                        symbol=symbol,
+                        side=exit_side,
+                        order_type=OrderType.TAKE_PROFIT,
+                        qty=abs(trade.get("executed_qty", trade.get("qty", 0.0))),
+                        stop_price=tp,
+                        trade_role="take_profit",
+                        parent_order_id=(state_trade.entry_order_id if state_trade else None),
+                    )
+                    if state_trade:
+                        state_trade.tp_order_id = tp_order_id
+                        state_trade.tp_price = tp
+                        self._save_order_state()
+                except Exception as exc:
+                    logger.warning("Failed to mirror TP order for %s: %s", symbol, exc)
 
             print(f"🎯 SL/TP SET {symbol} {side} | SL: {sl} | TP: {tp}")
 
@@ -178,22 +386,32 @@ class TradeManager:
                 meta["be_moved"] = True
                 print(f"🔒 BREAKEVEN MOVED for {symbol} @ {new_sl:.4f}")
 
+    def _get_open_orders(self, symbol=None):
+        if self.portfolio_cache is not None:
+            return self.portfolio_cache.get_open_orders(symbol=symbol)
+        try:
+            return self.binance.client.futures_get_open_orders(symbol=symbol)
+        except Exception as exc:
+            logger.warning("Failed to fetch open orders for %s: %s", symbol, exc)
+            return []
+
     def _update_stop_loss(self, symbol, new_sl, side):
         """Cancel old SL and place new one"""
         try:
             # Cancel existing SL orders
-            open_orders = self.binance.client.futures_get_open_orders(symbol=symbol)
+            open_orders = self._get_open_orders(symbol=symbol)
             for order in open_orders:
                 if order["type"] == "STOP_MARKET":
                     self.binance.client.futures_cancel_order(
                         symbol=symbol, orderId=order["orderId"]
                     )
+                    self._mirror_cancel_order(order["orderId"])
 
             _, price_precision = self.binance.get_symbol_precision(symbol)
             new_sl = round(new_sl, price_precision)
             exit_side = "SELL" if side == "LONG" else "BUY"
 
-            self.binance.client.futures_create_order(
+            sl_order = self.binance.client.futures_create_order(
                 symbol=symbol,
                 side=exit_side,
                 type="STOP_MARKET",
@@ -201,6 +419,26 @@ class TradeManager:
                 closePosition=True,
                 workingType="MARK_PRICE"
             )
+            if self.order_state_manager:
+                try:
+                    state_trade = self.order_state_manager.get_trade_by_symbol(symbol)
+                    sl_order_id = int(sl_order.get("orderId", 0))
+                    self._record_order_shadow(
+                        order_id=sl_order_id,
+                        symbol=symbol,
+                        side=exit_side,
+                        order_type=OrderType.STOP_LOSS,
+                        qty=abs(self.trade_metadata.get(symbol, {}).get("qty", 0.0)),
+                        stop_price=new_sl,
+                        trade_role="stop_loss",
+                        parent_order_id=(state_trade.entry_order_id if state_trade else None),
+                    )
+                    if state_trade:
+                        state_trade.sl_order_id = sl_order_id
+                        state_trade.sl_price = new_sl
+                        self._save_order_state()
+                except Exception as exc:
+                    logger.warning("Failed to mirror updated SL for %s: %s", symbol, exc)
         except Exception as e:
             print(f"❌ Update SL error {symbol}: {e}")
 
@@ -235,7 +473,7 @@ class TradeManager:
                     continue
 
                 # Check existing orders (improved detection)
-                open_orders = self.binance.client.futures_get_open_orders(symbol=symbol)
+                open_orders = self._get_open_orders(symbol=symbol)
                 
                 has_sl = False
                 has_tp = False
@@ -320,7 +558,7 @@ class TradeManager:
                 # Place SL
                 if not has_sl:
                     try:
-                        self.binance.client.futures_create_order(
+                        sl_order = self.binance.client.futures_create_order(
                             symbol=symbol,
                             side=exit_side,
                             type="STOP_MARKET",
@@ -329,6 +567,26 @@ class TradeManager:
                             workingType="MARK_PRICE"
                         )
                         print(f"✅ SL placed for {symbol} @ {sl}")
+                        if self.order_state_manager:
+                            try:
+                                state_trade = self.order_state_manager.get_trade_by_symbol(symbol)
+                                sl_order_id = int(sl_order.get("orderId", 0))
+                                self._record_order_shadow(
+                                    order_id=sl_order_id,
+                                    symbol=symbol,
+                                    side=exit_side,
+                                    order_type=OrderType.STOP_LOSS,
+                                    qty=abs(self.trade_metadata.get(symbol, {}).get("qty", 0.0)),
+                                    stop_price=sl,
+                                    trade_role="stop_loss",
+                                    parent_order_id=(state_trade.entry_order_id if state_trade else None),
+                                )
+                                if state_trade:
+                                    state_trade.sl_order_id = sl_order_id
+                                    state_trade.sl_price = sl
+                                    self._save_order_state()
+                            except Exception as exc:
+                                logger.warning("Failed to mirror recovered SL %s: %s", symbol, exc)
                         time.sleep(0.3)
                     except Exception as e:
                         print(f"❌ SL placement failed {symbol}: {e}")
@@ -336,7 +594,7 @@ class TradeManager:
                 # Place TP
                 if not has_tp:
                     try:
-                        self.binance.client.futures_create_order(
+                        tp_order = self.binance.client.futures_create_order(
                             symbol=symbol,
                             side=exit_side,
                             type="TAKE_PROFIT_MARKET",
@@ -345,6 +603,26 @@ class TradeManager:
                             workingType="MARK_PRICE"
                         )
                         print(f"✅ TP placed for {symbol} @ {tp}")
+                        if self.order_state_manager:
+                            try:
+                                state_trade = self.order_state_manager.get_trade_by_symbol(symbol)
+                                tp_order_id = int(tp_order.get("orderId", 0))
+                                self._record_order_shadow(
+                                    order_id=tp_order_id,
+                                    symbol=symbol,
+                                    side=exit_side,
+                                    order_type=OrderType.TAKE_PROFIT,
+                                    qty=abs(self.trade_metadata.get(symbol, {}).get("qty", 0.0)),
+                                    stop_price=tp,
+                                    trade_role="take_profit",
+                                    parent_order_id=(state_trade.entry_order_id if state_trade else None),
+                                )
+                                if state_trade:
+                                    state_trade.tp_order_id = tp_order_id
+                                    state_trade.tp_price = tp
+                                    self._save_order_state()
+                            except Exception as exc:
+                                logger.warning("Failed to mirror recovered TP %s: %s", symbol, exc)
                         time.sleep(0.3)
                     except Exception as e:
                         print(f"❌ TP placement failed {symbol}: {e}")
@@ -450,5 +728,6 @@ class TradeManager:
 
     def cleanup_closed_trade(self, symbol):
         """Remove metadata when trade closes"""
+        self._mirror_trade_closure(symbol)
         if symbol in self.trade_metadata:
             del self.trade_metadata[symbol]

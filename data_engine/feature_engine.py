@@ -16,24 +16,32 @@ from strategy_engine.btc_regime import BTCRegimeDetector
 from utils.telegram import send_telegram
 from utils.telegram_commands import get_updates, handle_command
 from monitoring.trade_tracker import TradeTracker
+from execution_engine.reconciliation import ReconciliationEngine
 
 tracker = TradeTracker()
 
 # ---------------- INIT SYSTEM ----------------
 binance = BinanceClient()
 risk = RiskManager()
-trade_manager = TradeManager(binance, risk)
-portfolio_cache = PortfolioCache(refresh_sec=10)
+trade_manager = TradeManager(binance, risk, portfolio_cache=None)
+portfolio_cache = PortfolioCache(binance_client=binance)
+trade_manager.portfolio_cache = portfolio_cache
 btc_regime = BTCRegimeDetector(binance, refresh_sec=60)
+
+
+
 
 symbols = [
     "BTCUSDT",
     "ETHUSDT",
     "SOLUSDT",
-    "AVAXUSDT",
+    "BNBUSDT",
+    "XRPUSDT",
+    "DOGEUSDT",
+    "ADAUSDT",
     "LINKUSDT",
-    "SUIUSDT",
-    "NEARUSDT"
+    "AVAXUSDT",
+    "DOTUSDT",
 ]
 
 
@@ -114,12 +122,11 @@ async def on_candle(candle):
     price = candle["close"]
 
     # ---------------- PORTFOLIO ----------------
-    if portfolio_cache.should_refresh():
-        portfolio = portfolio_cache.update(trade_manager.get_portfolio)
-        if portfolio:
-            trade_manager.ensure_sl_tp(portfolio)
-    else:
-        portfolio = portfolio_cache.get()
+    refreshed = portfolio_cache.refresh_if_needed()
+    portfolio = portfolio_cache.get_portfolio()
+
+    if refreshed and portfolio:
+        trade_manager.ensure_sl_tp(portfolio)
 
     if not portfolio:
         return
@@ -135,7 +142,7 @@ async def on_candle(candle):
 
 
     # LIVE portfolio for accurate close detection
-    live_portfolio = trade_manager.get_portfolio()
+    live_portfolio = portfolio_cache.get_portfolio()
     live_positions = live_portfolio.get("positions", {})
 
     for sym in list(tracker.active_trades.keys()):
@@ -267,6 +274,10 @@ VolSpike: {last['volume_spike']} | Signal: {side} (score={score})
     if side is None:
         return
 
+    if not portfolio_cache.is_trading_ready():
+        print(f"⚠️ Skipping {symbol} — portfolio cache stale beyond TTL")
+        return
+
     # ---------------- EXECUTE ----------------
     if trade_manager.is_already_in_trade(symbol, portfolio):
         return
@@ -313,19 +324,62 @@ TP: {trade['take_profit']:.4f}
 """))
 
 
+# async def telegram_listener():
+#     print("📲 Telegram listener started")
+#     while True:
+#         for update in get_updates():
+#             if "message" in update:
+#                 text = update["message"]["text"]
+#                 response = handle_command(text, binance)
+#                 asyncio.create_task(send_telegram(response))
+#         await asyncio.sleep(2)
+
+
+
 async def telegram_listener():
+
     print("📲 Telegram listener started")
+
     while True:
-        for update in get_updates():
-            if "message" in update:
-                text = update["message"]["text"]
-                response = handle_command(text, binance)
-                asyncio.create_task(send_telegram(response))
-        await asyncio.sleep(2)
+
+        try:
+
+            for update in get_updates():
+
+                if "message" in update:
+
+                    text = update["message"]["text"]
+
+                    response = handle_command(
+                        text,
+                        binance
+                    )
+
+                    asyncio.create_task(
+                        send_telegram(response)
+                    )
+
+        except Exception as e:
+
+            print(
+                f"⚠️ Telegram listener error: {e}"
+            )
+
+        await asyncio.sleep(5)
 
 
 async def main():
     print("⚡ PHASE 5 ENGINE STARTED (BTC Regime + Dynamic SL/TP + SHORT)")
+    await portfolio_cache.start_background_refresh()
+
+    reconciliation = ReconciliationEngine(
+        binance_client=binance,
+        order_state_manager=trade_manager.order_state_manager,
+        portfolio_cache=portfolio_cache,
+    )
+
+    reconciliation.startup_scan()
+
     stream = BinanceStream(symbols)
     await asyncio.gather(
         stream.start(on_candle_close=on_candle),
