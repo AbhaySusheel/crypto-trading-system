@@ -228,6 +228,30 @@ class TradeManager:
             executed_qty = abs(float(order["executedQty"]))
             trade["executed_qty"] = executed_qty
 
+            # -------------------------------------------------
+            # Save Binance execution metadata into trade dict
+            # -------------------------------------------------
+
+            trade["entry_order_id"] = int(order["orderId"])
+
+            trade["entry_time"] = int(
+                order.get(
+                    "updateTime",
+                    order.get("transactTime", 0)
+                )
+            )
+
+            trade["entry_price"] = float(
+                order.get(
+                    "avgPrice",
+                    trade["entry"]
+                )
+            )
+
+            trade["client_order_id"] = order.get(
+                "clientOrderId"
+            )
+
             if self.order_state_manager:
                 try:
                     state_trade = self.order_state_manager.create_trade(
@@ -262,7 +286,13 @@ class TradeManager:
                 "tp": trade["take_profit"],
                 "qty": executed_qty,
                 "partial_taken": False,
-                "be_moved": False  # breakeven moved
+                "be_moved": False, 
+                "entry_order_id": int(order["orderId"]),
+                "entry_time": int(order.get("updateTime", order.get("transactTime", 0))),
+                "entry_price": float(order.get("avgPrice", trade["entry"])),
+
+                # Optional but useful
+                "client_order_id": order.get("clientOrderId")
             }
 
             print(f"✅ ORDER PLACED: {symbol} {side}")
@@ -387,12 +417,20 @@ class TradeManager:
                 print(f"🔒 BREAKEVEN MOVED for {symbol} @ {new_sl:.4f}")
 
     def _get_open_orders(self, symbol=None):
-        if self.portfolio_cache is not None:
-            return self.portfolio_cache.get_open_orders(symbol=symbol)
+        """
+        Always fetch live open orders from Binance.
+
+        Protection recovery must use real-time exchange state,
+        not the cached portfolio snapshot.
+        """
         try:
             return self.binance.client.futures_get_open_orders(symbol=symbol)
         except Exception as exc:
-            logger.warning("Failed to fetch open orders for %s: %s", symbol, exc)
+            logger.warning(
+                "Failed to fetch open orders for %s: %s",
+                symbol,
+                exc,
+            )
             return []
 
     def _update_stop_loss(self, symbol, new_sl, side):
@@ -657,10 +695,12 @@ class TradeManager:
         self.last_trade_time[symbol] = now
         return True
 
-
-    def get_last_fill_data(self, symbol):
+    def get_last_fill_data(self, symbol, trade_info):
         """
-        Get REAL close information from Binance.
+        Returns REAL close information for THIS trade only.
+
+        Uses the stored entry metadata to locate the correct closing
+        order from Binance trade history.
 
         Returns:
         {
@@ -672,59 +712,163 @@ class TradeManager:
         """
 
         try:
+
             trades = self.binance.client.futures_account_trades(
                 symbol=symbol,
-                limit=20
+                limit=50
+            )
+
+            if not trades:
+                print("No Binance trades returned.")
+                return None
+
+            ##############################################################
+            # Sort trades chronologically
+            ##############################################################
+
+            trades = sorted(
+                trades,
+                key=lambda t: int(t.get("time", 0))
+            )
+
+            entry_time = int(trade_info.get("entry_time", 0))
+            entry_side = trade_info.get("side", "LONG")
+
+            expected_exit_side = (
+                "SELL"
+                if entry_side == "LONG"
+                else "BUY"
             )
 
             print("\n" + "=" * 80)
             print(f"RAW BINANCE TRADES FOR {symbol}")
 
-            for i, t in enumerate(trades):
-                print(f"""
-            Trade #{i}
+            print(f"""
+    ENTRY METADATA
 
-            Time          : {t.get("time")}
-            Order ID      : {t.get("orderId")}
-            Side          : {t.get("side")}
-            Position Side : {t.get("positionSide")}
-            Price         : {t.get("price")}
-            Qty           : {t.get("qty")}
-            RealizedPnL   : {t.get("realizedPnl")}
-            Commission    : {t.get("commission")}
-            Buyer         : {t.get("buyer")}
-            Maker         : {t.get("maker")}
-            """)
+    Entry Order ID : {trade_info.get("entry_order_id")}
+    Entry Time     : {entry_time}
+    Entry Price    : {trade_info.get("entry_price")}
+    Entry Qty      : {trade_info.get("qty")}
+    Entry Side     : {entry_side}
+    Expected Exit  : {expected_exit_side}
+    Client Order   : {trade_info.get("client_order_id")}
+    """)
+
+            for i, t in enumerate(trades):
+
+                print(f"""
+    Trade #{i}
+
+    Time          : {t.get("time")}
+    Order ID      : {t.get("orderId")}
+    Side          : {t.get("side")}
+    Position Side : {t.get("positionSide")}
+    Price         : {t.get("price")}
+    Qty           : {t.get("qty")}
+    RealizedPnL   : {t.get("realizedPnl")}
+    Commission    : {t.get("commission")}
+    Buyer         : {t.get("buyer")}
+    Maker         : {t.get("maker")}
+    """)
 
             print("=" * 80)
 
-            close_trades = []
+            ##############################################################
+            # Find matching closing order
+            ##############################################################
 
-            for t in reversed(trades):
+            closing_order_id = None
 
+            for t in trades:
+
+                trade_time = int(t.get("time", 0))
                 realized = float(t.get("realizedPnl", 0))
+                qty = abs(float(t.get("qty", 0)))
+                side = t.get("side")
 
-                # Only actual closing trades
-                if realized != 0:
-                    print(f"""
-                SELECTED CLOSE TRADE
+                # Trade happened before this position opened
+                if trade_time <= entry_time:
+                    continue
 
-                Price       : {t['price']}
-                Qty         : {t['qty']}
-                RealizedPnL : {t['realizedPnl']}
-                Commission  : {t.get('commission')}
-                Order ID    : {t.get('orderId')}
-                """)
+                # Opening fills have zero realized pnl
+                if realized == 0:
+                    continue
 
-                    close_trades.append(t)
+                # Ignore funding / adjustment rows
+                if qty == 0:
+                    continue
 
-            if not close_trades:
+                # Exit must be opposite side
+                if side != expected_exit_side:
+                    continue
+
+                closing_order_id = t["orderId"]
+
+                print(f"""
+    MATCHED CLOSING ORDER
+
+    Order ID      : {closing_order_id}
+    Trade Time    : {trade_time}
+    Side          : {side}
+    Price         : {t["price"]}
+    Qty           : {qty}
+    RealizedPnL   : {realized}
+    """)
+
+                break
+
+            if closing_order_id is None:
+
+                print(f"""
+    ❌ NO MATCHING CLOSE FOUND
+
+    Entry Time      : {entry_time}
+    Entry Side      : {entry_side}
+    Expected Exit   : {expected_exit_side}
+    """)
+
                 return None
 
-            total_qty = 0
-            total_value = 0
-            total_pnl = 0
-            total_commission = 0
+            ##############################################################
+            # Collect fills belonging ONLY to this order
+            ##############################################################
+
+            close_trades = []
+
+            for t in trades:
+
+                if t["orderId"] != closing_order_id:
+                    continue
+
+                if t.get("side") != expected_exit_side:
+                    continue
+
+                print(f"""
+    SELECTED CLOSE FILL
+
+    Order ID      : {t['orderId']}
+    Price         : {t['price']}
+    Qty           : {t['qty']}
+    RealizedPnL   : {t['realizedPnl']}
+    Commission    : {t.get('commission')}
+    """)
+
+                close_trades.append(t)
+
+            if not close_trades:
+
+                print("No fills found for matched closing order.")
+                return None
+
+            ##############################################################
+            # Weighted average exit
+            ##############################################################
+
+            total_qty = 0.0
+            total_value = 0.0
+            total_pnl = 0.0
+            total_commission = 0.0
 
             for t in close_trades:
 
@@ -734,8 +878,7 @@ class TradeManager:
                 total_qty += qty
                 total_value += qty * price
 
-                total_pnl += float(t["realizedPnl"])
-
+                total_pnl += float(t.get("realizedPnl", 0))
                 total_commission += abs(
                     float(t.get("commission", 0))
                 )
@@ -745,14 +888,16 @@ class TradeManager:
                 if total_qty else 0
             )
 
-            print("\nFINAL EXIT CALCULATION")
+            print("\n" + "=" * 80)
+            print("FINAL EXIT CALCULATION")
 
-            print(f"Total Qty        : {total_qty}")
-            print(f"Total Value      : {total_value}")
+            print(f"Matched Order ID : {closing_order_id}")
+            print(f"Exit Qty         : {total_qty}")
             print(f"Average Exit     : {avg_exit}")
-            print(f"Total PnL        : {total_pnl}")
+            print(f"Realized PnL     : {total_pnl}")
             print(f"Commission       : {total_commission}")
             print(f"Net PnL          : {total_pnl - total_commission}")
+            print("=" * 80)
 
             return {
                 "exit_price": avg_exit,
@@ -762,9 +907,10 @@ class TradeManager:
             }
 
         except Exception as e:
+
             print(f"❌ get_last_fill_data error {symbol}: {e}")
 
-        return None    
+        return None
 
     def cleanup_closed_trade(self, symbol):
         """Remove metadata when trade closes"""

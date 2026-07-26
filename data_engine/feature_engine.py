@@ -149,7 +149,17 @@ async def on_candle(candle):
 
         if sym not in live_positions:
 
-            fill_data = trade_manager.get_last_fill_data(sym)
+            trade_info = tracker.get_trade(sym)
+            if trade_info is None:
+                print(f"No tracker info for {sym}")
+                fill_data = None
+            else:
+                fill_data = trade_manager.get_last_fill_data(
+                    sym,
+                    trade_info
+                )    
+
+            
 
             if fill_data:
                 exit_price = fill_data["exit_price"]

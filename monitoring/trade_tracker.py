@@ -7,9 +7,21 @@ class TradeTracker:
 
     def add_trade(self, trade):
         self.active_trades[trade["symbol"]] = {
+            "symbol": trade["symbol"],
+
+            # Trade information
+            "side": trade["side"],
             "entry": trade["entry"],
-            "qty": trade["qty"],
-            "time": time.time()
+            "qty": trade["executed_qty"],
+
+            # Binance metadata
+            "entry_order_id": trade.get("entry_order_id"),
+            "entry_time": trade.get("entry_time"),
+            "entry_price": trade.get("entry_price"),
+            "client_order_id": trade.get("client_order_id"),
+
+            # Local bookkeeping
+            "local_time": time.time()
         }
 
     def close_trade(self, symbol, exit_price):
@@ -38,6 +50,9 @@ class TradeTracker:
         self.history.append(record)
 
         return record
+
+    def get_trade(self, symbol):
+        return self.active_trades.get(symbol)
 
     def stats(self):
         total = len(self.history)
