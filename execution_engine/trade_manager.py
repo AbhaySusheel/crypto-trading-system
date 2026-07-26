@@ -677,6 +677,27 @@ class TradeManager:
                 limit=20
             )
 
+            print("\n" + "=" * 80)
+            print(f"RAW BINANCE TRADES FOR {symbol}")
+
+            for i, t in enumerate(trades):
+                print(f"""
+            Trade #{i}
+
+            Time          : {t.get("time")}
+            Order ID      : {t.get("orderId")}
+            Side          : {t.get("side")}
+            Position Side : {t.get("positionSide")}
+            Price         : {t.get("price")}
+            Qty           : {t.get("qty")}
+            RealizedPnL   : {t.get("realizedPnl")}
+            Commission    : {t.get("commission")}
+            Buyer         : {t.get("buyer")}
+            Maker         : {t.get("maker")}
+            """)
+
+            print("=" * 80)
+
             close_trades = []
 
             for t in reversed(trades):
@@ -685,6 +706,16 @@ class TradeManager:
 
                 # Only actual closing trades
                 if realized != 0:
+                    print(f"""
+                SELECTED CLOSE TRADE
+
+                Price       : {t['price']}
+                Qty         : {t['qty']}
+                RealizedPnL : {t['realizedPnl']}
+                Commission  : {t.get('commission')}
+                Order ID    : {t.get('orderId')}
+                """)
+
                     close_trades.append(t)
 
             if not close_trades:
@@ -713,6 +744,15 @@ class TradeManager:
                 total_value / total_qty
                 if total_qty else 0
             )
+
+            print("\nFINAL EXIT CALCULATION")
+
+            print(f"Total Qty        : {total_qty}")
+            print(f"Total Value      : {total_value}")
+            print(f"Average Exit     : {avg_exit}")
+            print(f"Total PnL        : {total_pnl}")
+            print(f"Commission       : {total_commission}")
+            print(f"Net PnL          : {total_pnl - total_commission}")
 
             return {
                 "exit_price": avg_exit,

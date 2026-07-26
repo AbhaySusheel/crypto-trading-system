@@ -155,6 +155,17 @@ async def on_candle(candle):
                 exit_price = fill_data["exit_price"]
                 net_pnl = fill_data["net_pnl"]
 
+
+                print("\n" + "=" * 80)
+                print("FILL DATA RECEIVED")
+
+                print(fill_data)
+
+                print(f"Exit Price : {exit_price}")
+                print(f"Net PnL    : {net_pnl}")
+
+                print("=" * 80)
+
                 print(
                     f"💰 {sym} CLOSED | "
                     f"Exit={exit_price:.4f} | "
@@ -166,12 +177,17 @@ async def on_candle(candle):
                 net_pnl = None
 
             result = tracker.close_trade(sym, exit_price)
+            print("\nTRACKER RESULT BEFORE BINANCE OVERRIDE")
+
+            print(result)
 
             if result:
 
                 # Override tracker pnl with REAL Binance pnl
                 if net_pnl is not None:
                     result["pnl"] = net_pnl
+                    print("\nTRACKER RESULT AFTER BINANCE OVERRIDE")
+                    print(result)
                     result["result"] = (
                         "WIN"
                         if net_pnl > 0
@@ -184,6 +200,26 @@ async def on_candle(candle):
 
                 stats = tracker.stats()
                 risk_status = risk.get_status()
+
+                telegram_message = f"""
+                📉 TRADE CLOSED
+
+                Symbol: {result['symbol']}
+                Result: {result['result']}
+                Actual Exit: {exit_price:.4f}
+                PnL: {round(result['pnl'], 4)} USDT
+
+                📊 Today's Stats:
+                Daily PnL: ${risk_status['daily_pnl']}
+                Trades: {risk_status['trades_today']}
+                Win Rate: {stats['win_rate']}%
+                Consecutive Losses: {risk_status['consecutive_losses']}
+                """
+
+                print("\nTELEGRAM MESSAGE")
+                print(telegram_message)
+
+                asyncio.create_task(send_telegram(telegram_message))
 
                 asyncio.create_task(send_telegram(f"""
 📉 TRADE CLOSED
