@@ -66,6 +66,13 @@ class TradeManager:
             trade = self.order_state_manager.get_trade_by_symbol(symbol)
             trade_id = trade.trade_id if trade else f"trade-{uuid.uuid4().hex}"
             client_order_id = self.order_state_manager.allocate_client_order_id()
+            print("DEBUG SHADOW ORDER")
+            print("order_id =", order_id)
+            print("symbol =", symbol)
+            print("qty =", qty)
+            print("type     :", order_type)
+            print("role     :", trade_role)
+            print("=" * 80)
             record = OrderRecord(
                 order_id=order_id,
                 client_order_id=client_order_id,
@@ -79,6 +86,7 @@ class TradeManager:
                 parent_order_id=parent_order_id,
                 trade_role=trade_role,
             )
+            print("OrderRecord.qty =", record.qty)
             self.order_state_manager.record_new_order(record)
             self._save_order_state()
             logger.info(
@@ -93,7 +101,9 @@ class TradeManager:
             # TODO: reconcile shadow order records with exchange order IDs during startup recovery.
             return record
         except Exception as exc:
-            logger.warning("Failed to record shadow order %s: %s", order_id, exc)
+
+            #logger.warning("Failed to record shadow order %s: %s", order_id, exc)
+            logger.exception("Failed to record shadow order")
             return None
 
     def _record_fill_shadow(self, order_id, qty, price, commission=0.0, commission_asset="USDT"):
