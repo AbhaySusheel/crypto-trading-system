@@ -378,7 +378,7 @@ Entry: {trade['entry']}
 Qty: {trade['qty']}
 SL: {trade['stop_loss']:.4f}
 TP: {trade['take_profit']:.4f}
-"""))
+""")
 
 
 # async def telegram_listener():
