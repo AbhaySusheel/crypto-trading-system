@@ -127,6 +127,8 @@ async def on_candle(candle):
 
     if refreshed and portfolio:
         trade_manager.ensure_sl_tp(portfolio)
+        portfolio_cache.refresh("open_orders")
+        portfolio = portfolio_cache.get_portfolio()
 
     if not portfolio:
         return
@@ -142,8 +144,9 @@ async def on_candle(candle):
 
 
     # LIVE portfolio for accurate close detection
-    live_portfolio = portfolio_cache.get_portfolio()
-    live_positions = live_portfolio.get("positions", {})
+    portfolio_cache.refresh("positions")
+    live_positions = portfolio_cache.get_positions()
+    
 
     for sym in list(tracker.active_trades.keys()):
 
@@ -161,32 +164,23 @@ async def on_candle(candle):
 
             
 
-            if fill_data:
-                exit_price = fill_data["exit_price"]
-                net_pnl = fill_data["net_pnl"]
+            if fill_data is None:
+                print(f"⚠️ Could not retrieve close data for {sym}. Will retry next cycle.")
+                continue
 
+            exit_price = fill_data["exit_price"]
+            net_pnl = fill_data["net_pnl"]
 
-                print("\n" + "=" * 80)
-                print("FILL DATA RECEIVED")
+            print("\n" + "=" * 80)
+            print("FILL DATA RECEIVED")
+            print(fill_data)
+            print(f"Exit Price : {exit_price}")
+            print(f"Net PnL    : {net_pnl}")
+            print("=" * 80)
 
-                print(fill_data)
+            result = tracker.close_trade(sym, exit_price)    
+                
 
-                print(f"Exit Price : {exit_price}")
-                print(f"Net PnL    : {net_pnl}")
-
-                print("=" * 80)
-
-                print(
-                    f"💰 {sym} CLOSED | "
-                    f"Exit={exit_price:.4f} | "
-                    f"NetPnL={net_pnl:.4f}"
-                )
-
-            else:
-                exit_price = price
-                net_pnl = None
-
-            result = tracker.close_trade(sym, exit_price)
             print("\nTRACKER RESULT BEFORE BINANCE OVERRIDE")
 
             print(result)
@@ -229,22 +223,22 @@ async def on_candle(candle):
                 print("\nTELEGRAM MESSAGE")
                 print(telegram_message)
 
-                asyncio.create_task(send_telegram(telegram_message))
+                await send_telegram(telegram_message)
 
-                asyncio.create_task(send_telegram(f"""
-📉 TRADE CLOSED
+#                 await send_telegram(f"""
+# 📉 TRADE CLOSED
 
-Symbol: {result['symbol']}
-Result: {result['result']}
-Actual Exit: {exit_price:.4f}
-PnL: {round(result['pnl'], 4)} USDT
+# Symbol: {result['symbol']}
+# Result: {result['result']}
+# Actual Exit: {exit_price:.4f}
+# PnL: {round(result['pnl'], 4)} USDT
 
-📊 Today's Stats:
-Daily PnL: ${risk_status['daily_pnl']}
-Trades: {risk_status['trades_today']}
-Win Rate: {stats['win_rate']}%
-Consecutive Losses: {risk_status['consecutive_losses']}
-"""))
+# 📊 Today's Stats:
+# Daily PnL: ${risk_status['daily_pnl']}
+# Trades: {risk_status['trades_today']}
+# Win Rate: {stats['win_rate']}%
+# Consecutive Losses: {risk_status['consecutive_losses']}
+# """))
 #     for sym in list(tracker.active_trades.keys()):
 #         if sym not in current_positions:
 #             # Get ACTUAL fill price, not approximate
@@ -351,17 +345,34 @@ ATR%: {atr_pct*100:.3f}%
 RSI: {last['rsi']:.2f}
 """
     print(msg)
-    asyncio.create_task(send_telegram(msg))
+    await send_telegram(msg)
 
     binance.set_leverage(symbol, 3)
     order = trade_manager.execute_trade(trade)
 
     if order:
-        await asyncio.sleep(1.5)
-        tracker.add_trade(trade)
-        trade_manager.set_sl_tp(trade)
+        await asyncio.sleep(2)
 
-        asyncio.create_task(send_telegram(f"""
+        portfolio_cache.refresh("positions")
+        portfolio_cache.refresh("open_orders")
+
+        portfolio = portfolio_cache.get_portfolio()
+        positions = portfolio["positions"]
+
+        
+
+
+        if symbol not in positions:
+            print(f"⚠️ {symbol} still not visible in Binance positions.")
+            return
+
+        tracker.add_trade(trade)   
+        try: 
+            trade_manager.set_sl_tp(trade)
+        except Exception:
+            logger.exception("Failed to set SL/TP for %s", symbol)    
+
+        await send_telegram(f"""
 ✅ {side} EXECUTED: {symbol}
 Entry: {trade['entry']}
 Qty: {trade['qty']}

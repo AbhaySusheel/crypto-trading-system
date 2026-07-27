@@ -715,7 +715,7 @@ class TradeManager:
 
             trades = self.binance.client.futures_account_trades(
                 symbol=symbol,
-                limit=50
+                limit=100
             )
 
             if not trades:
@@ -733,6 +733,8 @@ class TradeManager:
 
             entry_time = int(trade_info.get("entry_time", 0))
             entry_side = trade_info.get("side", "LONG")
+            entry_qty = abs(float(trade_info.get("qty", 0.0)))
+            closed_qty = 0.0
 
             expected_exit_side = (
                 "SELL"
@@ -792,7 +794,7 @@ class TradeManager:
                     continue
 
                 # Opening fills have zero realized pnl
-                if realized == 0:
+                if abs(realized) < 1e-8:
                     continue
 
                 # Ignore funding / adjustment rows
@@ -803,7 +805,14 @@ class TradeManager:
                 if side != expected_exit_side:
                     continue
 
-                closing_order_id = t["orderId"]
+                closed_qty += qty
+
+                if closed_qty >= entry_qty:
+                    closing_order_id = t["orderId"]
+                    break
+
+
+                
 
                 print(f"""
     MATCHED CLOSING ORDER
