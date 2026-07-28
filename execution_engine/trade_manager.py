@@ -276,17 +276,22 @@ class TradeManager:
                         symbol=symbol,
                         side=order_side,
                         order_type=OrderType.ENTRY,
-                        qty=quantity,
-                        price=trade.get("entry"),
+                        qty=executed_qty, 
+                        price=trade["entry_price"], 
                         trade_role="entry",
                     )
                     self._record_fill_shadow(
                         order_id=int(order["orderId"]),
                         qty=executed_qty,
-                        price=trade.get("entry"),
+                        price=trade["entry_price"],
                     )
                 except Exception as exc:
-                    logger.warning("Failed to mirror entry trade for %s: %s", symbol, exc)
+                    #logger.warning("Failed to mirror entry trade for %s: %s", symbol, exc)
+                    logger.exception(
+                        "Failed to mirror entry trade for %s",
+                        symbol,
+                    )
+                    raise
 
             # Store metadata for trailing stop & partial TP
             self.trade_metadata[symbol] = {
@@ -819,23 +824,23 @@ class TradeManager:
 
                 if closed_qty >= entry_qty:
                     closing_order_id = t["orderId"]
-                    break
+                    
 
 
                 
 
-                print(f"""
-    MATCHED CLOSING ORDER
+                    print(f"""
+        MATCHED CLOSING ORDER
 
-    Order ID      : {closing_order_id}
-    Trade Time    : {trade_time}
-    Side          : {side}
-    Price         : {t["price"]}
-    Qty           : {qty}
-    RealizedPnL   : {realized}
-    """)
+        Order ID      : {closing_order_id}
+        Trade Time    : {trade_time}
+        Side          : {side}
+        Price         : {t["price"]}
+        Qty           : {qty}
+        RealizedPnL   : {realized}
+        """)
 
-                break
+                    break
 
             if closing_order_id is None:
 
