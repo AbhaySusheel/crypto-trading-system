@@ -301,19 +301,45 @@ class OrderRecord:
 
     def validate_invariants(self) -> None:
         if self.qty <= 0:
+            print("\n" + "=" * 80)
+            print("ORDERRECORD VALIDATION FAILED")
+            print(f"client_order_id : {self.client_order_id}")
+            print(f"order_id        : {self.order_id}")
+            print(f"trade_id        : {self.trade_id}")
+            print(f"symbol          : {self.symbol}")
+            print(f"trade_role      : {self.trade_role}")
+            print(f"type            : {self.type}")
+            print(f"side            : {self.side}")
+            print(f"qty             : {self.qty}")
+            print(f"filled_qty      : {self._filled_qty}")
+            print(f"remaining_qty   : {self._remaining_qty}")
+            print(f"price           : {self.price}")
+            print(f"stop_price      : {self.stop_price}")
+            print(f"status          : {self._status}")
+            print("=" * 80 + "\n")
+
             raise OrderStateError("Order qty must be positive")
+
         if self._filled_qty < 0.0:
             raise OrderStateError("filled_qty cannot be negative")
+
         if self._filled_qty > self.qty:
             raise OrderStateError("filled_qty cannot exceed qty")
+
         if self._remaining_qty != round(self.qty - self._filled_qty, 10):
             raise OrderStateError("remaining_qty must equal qty - filled_qty")
+
         if self._status == OrderStatus.FILLED and self._remaining_qty != 0.0:
             raise OrderStateError("FILLED status requires remaining_qty == 0")
-        if self._status == OrderStatus.PARTIAL_FILLED and not (0.0 < self._filled_qty < self.qty):
+
+        if self._status == OrderStatus.PARTIAL_FILLED and not (
+            0.0 < self._filled_qty < self.qty
+        ):
             raise OrderStateError("PARTIAL_FILLED requires 0 < filled_qty < qty")
+
         if self._status == OrderStatus.PENDING and self._filled_qty != 0.0:
             raise OrderStateError("PENDING status requires filled_qty == 0")
+
 
     def repair_invariants(self) -> None:
         self._recalculate_fill_totals()
@@ -367,6 +393,13 @@ class OrderRecord:
 
     @classmethod
     def from_dict(cls, data: Dict[str, Any]) -> "OrderRecord":
+        print("=" * 80)
+        print("LOADING ORDER")
+        print("order_id =", data.get("order_id"))
+        print("qty =", data.get("qty"))
+        print("trade_role =", data.get("trade_role"))
+        print("=" * 80)
+
         order = cls(
             order_id=data.get("order_id"),
             client_order_id=str(data["client_order_id"]),
@@ -386,6 +419,8 @@ class OrderRecord:
             metadata=dict(data.get("metadata", {})),
             fills=[FillEvent.from_dict(item) for item in data.get("fills", [])],
         )
+
+        print("LOADED ORDER:", order.order_id, order.qty)
 
         order._filled_qty = float(data.get("filled_qty", order._filled_qty))
         order._remaining_qty = float(data.get("remaining_qty", order.qty - order._filled_qty))
@@ -935,13 +970,20 @@ class OrderStateManager:
             try:
                 order.repair_invariants()
             except Exception as exc:
-                logger.warning("Order invariant repair failed for %s: %s", order.client_order_id, exc)
+                logger.exception(
+                    "Order invariant repair failed for %s",
+                    order.client_order_id,
+                )
+                raise
         for trade in self.trades_by_id.values():
             try:
                 trade.repair_invariants()
             except Exception as exc:
-                logger.warning("Trade invariant repair failed for %s: %s", trade.trade_id, exc)
-
+                logger.exception(
+                    "Trade invariant repair failed for %s",
+                    trade.trade_id,
+                )
+                raise
     def validate_invariants(self) -> None:
         for order in self.orders_by_client_id.values():
             order.validate_invariants()

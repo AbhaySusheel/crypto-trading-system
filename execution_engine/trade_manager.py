@@ -38,7 +38,8 @@ class TradeManager:
             # TODO: future reconciliation should hydrate live trade state from exchange on startup.
         except Exception as exc:
             self.order_state_manager = None
-            logger.warning("Order state manager unavailable: %s", exc)
+            #logger.warning("Order state manager unavailable: %s", exc)
+            logger.exception("Order state manager unavailable")
 
     def _save_order_state(self):
         if not self.order_state_manager:
