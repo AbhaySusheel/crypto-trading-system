@@ -368,6 +368,8 @@ RSI: {last['rsi']:.2f}
 
         tracker.add_trade(trade)   
         try: 
+            logger.info("Trade dict before SL/TP creation: %s", trade)
+            
             trade_manager.set_sl_tp(trade)
         except Exception:
             logger.exception("Failed to set SL/TP for %s", symbol)    

@@ -229,6 +229,14 @@ class TradeManager:
         print(f"⚡ EXECUTING {side}: {symbol} | Qty: {quantity}")
 
         try:
+
+
+            logger.info(
+                "Creating TradeRecord: entry_qty=%s entry_order_id=%s",
+                executed_qty,
+                order["orderId"],
+            )
+
             order = self.binance.client.futures_create_order(
                 symbol=symbol,
                 side=order_side,
@@ -236,7 +244,25 @@ class TradeManager:
                 quantity=quantity
             )
 
-            executed_qty = abs(float(order["executedQty"]))
+            logger.info("Market order response: %s", order)
+
+            logger.info(
+                "Entry execution: symbol=%s orderId=%s status=%s origQty=%s executedQty=%s avgPrice=%s",
+                symbol,
+                order.get("orderId"),
+                order.get("status"),
+                order.get("origQty"),
+                order.get("executedQty"),
+                order.get("avgPrice"),
+            )
+
+            executed_qty = abs(float(order.get("executedQty", 0)))
+
+            logger.info(
+                "Parsed quantities: requested_qty=%s executed_qty=%s",
+                quantity,
+                executed_qty,
+            )
             trade["executed_qty"] = executed_qty
 
             # -------------------------------------------------
@@ -272,6 +298,21 @@ class TradeManager:
                         entry_order_id=int(order["orderId"]),
                     )
                     state_trade.entry_filled_qty = executed_qty
+
+                    logger.info(
+                        "[ENTRY SHADOW] symbol=%s orderId=%s "
+                        "requested_qty=%s executed_qty=%s "
+                        "status=%s origQty=%s executedQty=%s avgPrice=%s",
+                        symbol,
+                        order["orderId"],
+                        trade.get("qty"),
+                        executed_qty,
+                        order.get("status"),
+                        order.get("origQty"),
+                        order.get("executedQty"),
+                        order.get("avgPrice"),
+                    )
+
                     self._record_order_shadow(
                         order_id=int(order["orderId"]),
                         symbol=symbol,
@@ -342,6 +383,19 @@ class TradeManager:
                 try:
                     state_trade = self.order_state_manager.get_trade_by_symbol(symbol)
                     sl_order_id = int(sl_order.get("orderId", 0))
+
+                    logger.info(
+                        "[SL SHADOW] symbol=%s "
+                        "trade.qty=%s "
+                        "trade.executed_qty=%s "
+                        "computed_qty=%s "
+                        "stop=%s",
+                        symbol,
+                        trade.get("qty"),
+                        trade.get("executed_qty"),
+                        abs(trade.get("executed_qty", trade.get("qty", 0.0))),
+                        sl,
+                    )
                     self._record_order_shadow(
                         order_id=sl_order_id,
                         symbol=symbol,
@@ -375,6 +429,18 @@ class TradeManager:
                 try:
                     state_trade = self.order_state_manager.get_trade_by_symbol(symbol)
                     tp_order_id = int(tp_order.get("orderId", 0))
+                    logger.info(
+                        "[TP SHADOW] symbol=%s "
+                        "trade.qty=%s "
+                        "trade.executed_qty=%s "
+                        "computed_qty=%s "
+                        "tp=%s",
+                        symbol,
+                        trade.get("qty"),
+                        trade.get("executed_qty"),
+                        abs(trade.get("executed_qty", trade.get("qty", 0.0))),
+                        tp,
+                    )
                     self._record_order_shadow(
                         order_id=tp_order_id,
                         symbol=symbol,
@@ -477,6 +543,14 @@ class TradeManager:
                 try:
                     state_trade = self.order_state_manager.get_trade_by_symbol(symbol)
                     sl_order_id = int(sl_order.get("orderId", 0))
+                    logger.info(
+                        "[ENSURE SL] symbol=%s "
+                        "metadata=%s "
+                        "computed_qty=%s",
+                        symbol,
+                        self.trade_metadata.get(symbol),
+                        abs(self.trade_metadata.get(symbol, {}).get("qty", 0.0)),
+                    )
                     self._record_order_shadow(
                         order_id=sl_order_id,
                         symbol=symbol,
@@ -625,6 +699,14 @@ class TradeManager:
                             try:
                                 state_trade = self.order_state_manager.get_trade_by_symbol(symbol)
                                 sl_order_id = int(sl_order.get("orderId", 0))
+                                logger.info(
+                                    "[ENSURE SL] symbol=%s "
+                                    "metadata=%s "
+                                    "computed_qty=%s",
+                                    symbol,
+                                    self.trade_metadata.get(symbol),
+                                    abs(self.trade_metadata.get(symbol, {}).get("qty", 0.0)),
+                                )
                                 self._record_order_shadow(
                                     order_id=sl_order_id,
                                     symbol=symbol,
@@ -661,6 +743,14 @@ class TradeManager:
                             try:
                                 state_trade = self.order_state_manager.get_trade_by_symbol(symbol)
                                 tp_order_id = int(tp_order.get("orderId", 0))
+                                logger.info(
+                                    "[ENSURE TP] symbol=%s "
+                                    "metadata=%s "
+                                    "computed_qty=%s",
+                                    symbol,
+                                    self.trade_metadata.get(symbol),
+                                    abs(self.trade_metadata.get(symbol, {}).get("qty", 0.0)),
+                                )
                                 self._record_order_shadow(
                                     order_id=tp_order_id,
                                     symbol=symbol,
