@@ -227,6 +227,38 @@ def test_invariant_violation_detection():
         trade.validate_invariants()
 
 
+def test_zero_qty_protection_order_loads():
+    payload = {
+        "order_id": 0,
+        "client_order_id": "order-000002",
+        "trade_id": "trade-1",
+        "symbol": "SOLUSDT",
+        "side": "BUY",
+        "type": "STOP_LOSS",
+        "qty": 0.0,
+        "price": None,
+        "stop_price": 82.4656,
+        "reduce_only": False,
+        "close_position": True,
+        "time_in_force": None,
+        "timestamp": "2026-05-25T00:00:00Z",
+        "parent_order_id": None,
+        "trade_role": "stop_loss",
+        "metadata": {},
+        "fills": [],
+        "status": "PENDING",
+        "filled_qty": 0.0,
+        "remaining_qty": 0.0,
+        "avg_fill_price": None,
+    }
+
+    restored = OrderRecord.from_dict(payload)
+
+    assert restored.type == OrderType.STOP_LOSS
+    assert restored.qty == pytest.approx(0.0)
+    assert restored.status == OrderStatus.PENDING
+
+
 def test_serialization_roundtrip():
     order = make_order("order-000005", "trade-1")
     order.mark_pending()

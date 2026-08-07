@@ -40,6 +40,7 @@ class TradeManager:
             self.order_state_manager = None
             #logger.warning("Order state manager unavailable: %s", exc)
             logger.exception("Order state manager unavailable")
+            logger.info("Order state path: %s", order_state_path)
 
     def _save_order_state(self):
         if not self.order_state_manager:
@@ -71,6 +72,8 @@ class TradeManager:
             print("order_id =", order_id)
             print("symbol =", symbol)
             print("qty =", qty)
+            print("price    :", price)
+            print("stop     :", stop_price)
             print("type     :", order_type)
             print("role     :", trade_role)
             print("=" * 80)
@@ -231,11 +234,7 @@ class TradeManager:
         try:
 
 
-            logger.info(
-                "Creating TradeRecord: entry_qty=%s entry_order_id=%s",
-                executed_qty,
-                order["orderId"],
-            )
+            
 
             order = self.binance.client.futures_create_order(
                 symbol=symbol,
@@ -258,12 +257,26 @@ class TradeManager:
 
             executed_qty = abs(float(order.get("executedQty", 0)))
 
+
+            logger.info(
+                "Creating TradeRecord: entry_qty=%s entry_order_id=%s",
+                executed_qty,
+                order["orderId"],
+            )
+
             logger.info(
                 "Parsed quantities: requested_qty=%s executed_qty=%s",
                 quantity,
                 executed_qty,
             )
             trade["executed_qty"] = executed_qty
+
+
+            logger.info(
+                "Trade dict before SL/TP: qty=%s executed_qty=%s",
+                trade.get("qty"),
+                trade.get("executed_qty"),
+            )
 
             # -------------------------------------------------
             # Save Binance execution metadata into trade dict
@@ -382,6 +395,8 @@ class TradeManager:
             if self.order_state_manager:
                 try:
                     state_trade = self.order_state_manager.get_trade_by_symbol(symbol)
+                    print("SL ORDER RESPONSE")
+                    print(sl_order)
                     sl_order_id = int(sl_order.get("orderId", 0))
 
                     logger.info(
@@ -428,6 +443,8 @@ class TradeManager:
             if self.order_state_manager:
                 try:
                     state_trade = self.order_state_manager.get_trade_by_symbol(symbol)
+                    print("TP ORDER RESPONSE")
+                    print(tp_order)
                     tp_order_id = int(tp_order.get("orderId", 0))
                     logger.info(
                         "[TP SHADOW] symbol=%s "
@@ -610,8 +627,11 @@ class TradeManager:
                     if qty > 0
                     else "BUY"
                 )
+
+                logger.info("===== OPEN ORDERS FOR %s =====", symbol)
                 
                 for order in open_orders:
+                    logger.info("OPEN ORDER: %s", order)
                     order_type = order.get("type", "")
                     order_side = order.get("side", "")
                     close_position = order.get("closePosition", False)
@@ -622,19 +642,27 @@ class TradeManager:
                     if order_side != expected_exit_side:
                         continue
 
+                       
+
                         # Not protection order -> ignore
                     if not (close_position or reduce_only):
                         continue
                     
                     # SL: STOP_MARKET or STOP
                     if order_type in ("STOP_MARKET", "STOP"):
-                        if close_position or reduce_only:
-                            has_sl = True
+                        
+                        has_sl = True
                     
                     # TP: TAKE_PROFIT_MARKET or TAKE_PROFIT
                     if order_type in ("TAKE_PROFIT_MARKET", "TAKE_PROFIT"):
-                        if close_position or reduce_only:
-                            has_tp = True
+                        
+                        has_tp = True
+
+                logger.info(
+                    "Protection detection: has_sl=%s has_tp=%s",
+                    has_sl,
+                    has_tp,
+                )        
 
                 if has_sl and has_tp:
                     continue  # Already protected

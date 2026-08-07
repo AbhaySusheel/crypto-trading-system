@@ -300,25 +300,34 @@ class OrderRecord:
         self.repair_invariants()
 
     def validate_invariants(self) -> None:
-        if self.qty <= 0:
-            print("\n" + "=" * 80)
-            print("ORDERRECORD VALIDATION FAILED")
-            print(f"client_order_id : {self.client_order_id}")
-            print(f"order_id        : {self.order_id}")
-            print(f"trade_id        : {self.trade_id}")
-            print(f"symbol          : {self.symbol}")
-            print(f"trade_role      : {self.trade_role}")
-            print(f"type            : {self.type}")
-            print(f"side            : {self.side}")
-            print(f"qty             : {self.qty}")
-            print(f"filled_qty      : {self._filled_qty}")
-            print(f"remaining_qty   : {self._remaining_qty}")
-            print(f"price           : {self.price}")
-            print(f"stop_price      : {self.stop_price}")
-            print(f"status          : {self._status}")
-            print("=" * 80 + "\n")
+        if self.qty < 0.0:
+            raise OrderStateError("Order qty cannot be negative")
 
-            raise OrderStateError("Order qty must be positive")
+        if self.qty == 0.0:
+            is_protection_order = self.type in {
+                OrderType.STOP_LOSS,
+                OrderType.TAKE_PROFIT,
+                OrderType.EXIT,
+            } or self.trade_role in {"stop_loss", "take_profit", "exit"}
+            if not is_protection_order:
+                print("\n" + "=" * 80)
+                print("ORDERRECORD VALIDATION FAILED")
+                print(f"client_order_id : {self.client_order_id}")
+                print(f"order_id        : {self.order_id}")
+                print(f"trade_id        : {self.trade_id}")
+                print(f"symbol          : {self.symbol}")
+                print(f"trade_role      : {self.trade_role}")
+                print(f"type            : {self.type}")
+                print(f"side            : {self.side}")
+                print(f"qty             : {self.qty}")
+                print(f"filled_qty      : {self._filled_qty}")
+                print(f"remaining_qty   : {self._remaining_qty}")
+                print(f"price           : {self.price}")
+                print(f"stop_price      : {self.stop_price}")
+                print(f"status          : {self._status}")
+                print("=" * 80 + "\n")
+
+                raise OrderStateError("Order qty must be positive")
 
         if self._filled_qty < 0.0:
             raise OrderStateError("filled_qty cannot be negative")
