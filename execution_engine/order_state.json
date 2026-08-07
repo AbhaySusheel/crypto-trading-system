@@ -75,7 +75,7 @@
       "time_in_force": null,
       "timestamp": "2026-05-30T04:49:13.825175Z",
       "trade_id": "trade-84f63c89b98244d9a2d007f0f3552f76",
-      "trade_role": "take_profit",
+      "trade_role": "take_profit", 
       "type": "TAKE_PROFIT"
     },
     "order-000004": {
